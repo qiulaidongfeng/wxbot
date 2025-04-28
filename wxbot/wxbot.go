@@ -3,15 +3,19 @@ package wxbot
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
@@ -47,19 +51,35 @@ type WeChatResponse struct {
 	Content      string `xml:"Content"`
 }
 
+func (w *WeChatResponse) ToXML() string {
+	ret := `<xml>
+  <ToUserName><![CDATA[%s]]></ToUserName>
+  <FromUserName><![CDATA[%s]]></FromUserName>
+  <CreateTime>%d</CreateTime>
+  <MsgType><![CDATA[text]]></MsgType>
+  <Content><![CDATA[%s]]></Content>
+</xml>`
+	ret = fmt.Sprintf(ret, w.ToUserName, w.FromUserName, w.CreateTime, w.Content)
+	return ret
+}
+
 func Handle(s *gin.Engine) {
-	/*
-		<xml>
-		  <ToUserName><![CDATA[toUser]]></ToUserName>
-		  <FromUserName><![CDATA[fromUser]]></FromUserName>
-		  <CreateTime>1348831860</CreateTime>
-		  <MsgType><![CDATA[text]]></MsgType>
-		  <Content><![CDATA[this is a test]]></Content>
-		  <MsgId>1234567890123456</MsgId>
-		  <MsgDataId>xxxx</MsgDataId>
-		  <Idx>xxxx</Idx>
-		</xml>
-	*/
+	s.GET("/", func(ctx *gin.Context) {
+		signature := ctx.Query("signature")
+		timestamp := ctx.Query("timestamp")
+		nonce := ctx.Query("nonce")
+		token := os.Getenv("wxbot_token")
+		if token == "" {
+			panic("wxbot_token不应为空")
+		}
+		s := []string{token, timestamp, nonce}
+		slices.Sort(s)
+		tmp := strings.Join(s, "")
+		got := sha1.Sum(unsafe.Slice(unsafe.StringData(tmp), len(tmp)))
+		if signature == fmt.Sprintf("%x", got) {
+			ctx.String(http.StatusOK, ctx.Query("echostr"))
+		}
+	})
 	s.POST("/", func(ctx *gin.Context) {
 		// 解析收到的消息
 		b, err := io.ReadAll(ctx.Request.Body)
@@ -80,11 +100,13 @@ func Handle(s *gin.Engine) {
 		// 处理收到的消息
 		var result string
 		if strings.HasPrefix(msg.Content, "加密密码") {
+			msg.Content = msg.Content[len("加密密码"):]
 			result, err = encrypt(msg.Content)
 			if err != nil {
 				result = err.Error()
 			}
 		} else if strings.HasPrefix(msg.Content, "解密密码") {
+			msg.Content = msg.Content[len("解密密码"):]
 			result, err = decrypt(msg.Content)
 			if err != nil {
 				result = err.Error()
@@ -93,8 +115,12 @@ func Handle(s *gin.Engine) {
 			// 使用strings.Contains确保在指令前后意外输入空格时仍然能返回帮助。
 			// Note: 这里可以安全的使用关键词匹配，而不用担心错误匹配到要加密的内容等非指令。
 			result = `此机器人目前支持以下功能：
-加解密 消息格式应该类似
+加密 消息格式应该类似
 加密密码123456
+内容abcd
+
+解密 消息格式应该类似
+解密密码123456
 内容abcd
 
 更多功能，敬请期待。
@@ -107,21 +133,17 @@ func Handle(s *gin.Engine) {
 		response := WeChatResponse{
 			ToUserName:   msg.FromUserName,
 			FromUserName: msg.ToUserName,
-			CreateTime:   msg.CreateTime,
-			MsgType:      msg.MsgType,
-			Content:      result,
+			CreateTime:   time.Now().Unix(),
+			MsgType:      "text",
+			Content:      "此消息由机器人自动回复：\n" + result,
 		}
 
 		// 将响应消息转为 XML 格式
-		xmlResponse, err := xml.MarshalIndent(response, "", "  ")
-		if err != nil {
-			panic(err)
-		}
+		xmlResponse := response.ToXML()
 
 		// 返回响应
 		ctx.Header("Content-Type", "application/xml")
-		ctx.String(http.StatusOK, "此消息由机器人自动回复：\n")
-		ctx.String(http.StatusOK, unsafe.String(unsafe.SliceData(xmlResponse), len(xmlResponse)))
+		ctx.String(http.StatusOK, xmlResponse)
 	})
 }
 
@@ -133,15 +155,14 @@ var grammar = errors.New(`格式错误：应该类似
 func parser(msg string) ([]string, error) {
 	//消息格式
 	//(加|解)密密码12345678\n内容xxxx
-	msg = msg[4:]
-	set := strings.SplitN(msg, "\n", 1)
+	set := strings.SplitN(msg, "\n", 2)
 	if len(set) != 2 {
 		return nil, grammar
 	}
 	if !strings.HasPrefix(set[1], "内容") {
 		return nil, grammar
 	}
-	set[1] = set[1][2:]
+	set[1] = set[1][len("内容"):]
 	return set, nil
 }
 
@@ -194,8 +215,7 @@ func aes256_decrypt(password string, content string) string {
 	if err != nil {
 		return "解密失败：可能是密文不完整或密码错误"
 	}
-
-	return base64.StdEncoding.EncodeToString((a.Seal(nil, nil, b, nil)))
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 //TODO: add test.
