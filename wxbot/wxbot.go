@@ -39,6 +39,7 @@ type WeChatMessage struct {
 	CreateTime   int64  `xml:"CreateTime"`
 	MsgType      string `xml:"MsgType"`
 	Content      string `xml:"Content"`
+	Event        string `xml:"Event"`
 	MsgId        int64  `xml:"MsgId"`
 }
 
@@ -63,6 +64,21 @@ func (w *WeChatResponse) ToXML() string {
 	return ret
 }
 
+const help = `此机器人目前支持以下功能：
+加密 消息格式应该类似
+加密密码123456
+内容abcd
+
+解密 消息格式应该类似
+解密密码123456
+内容mn9T2M0CQIiqMKSYZWjySC8s5xgn9jSWMPWa4kg=
+
+获取最新帮助 消息格式应该类似
+帮助
+
+更多功能，敬请期待。
+`
+
 func Handle(s *gin.Engine) {
 	s.GET("/", func(ctx *gin.Context) {
 		signature := ctx.Query("signature")
@@ -81,6 +97,7 @@ func Handle(s *gin.Engine) {
 		}
 	})
 	s.POST("/", func(ctx *gin.Context) {
+		// TODO: 验证消息是否来自微信服务器
 		// 解析收到的消息
 		b, err := io.ReadAll(ctx.Request.Body)
 		if err != nil {
@@ -99,7 +116,9 @@ func Handle(s *gin.Engine) {
 
 		// 处理收到的消息
 		var result string
-		if strings.HasPrefix(msg.Content, "加密密码") {
+		if msg.Event == "subscribe" { //如果有用户关注
+			result = help
+		} else if strings.HasPrefix(msg.Content, "加密密码") {
 			msg.Content = msg.Content[len("加密密码"):]
 			result, err = encrypt(msg.Content)
 			if err != nil {
@@ -114,17 +133,7 @@ func Handle(s *gin.Engine) {
 		} else if strings.Contains(msg.Content, "帮助") {
 			// 使用strings.Contains确保在指令前后意外输入空格时仍然能返回帮助。
 			// Note: 这里可以安全的使用关键词匹配，而不用担心错误匹配到要加密的内容等非指令。
-			result = `此机器人目前支持以下功能：
-加密 消息格式应该类似
-加密密码123456
-内容abcd
-
-解密 消息格式应该类似
-解密密码123456
-内容abcd
-
-更多功能，敬请期待。
-`
+			result = help
 		} else {
 			result = "未知的操作"
 		}
@@ -135,7 +144,7 @@ func Handle(s *gin.Engine) {
 			FromUserName: msg.ToUserName,
 			CreateTime:   time.Now().Unix(),
 			MsgType:      "text",
-			Content:      "此消息由机器人自动回复：\n" + result,
+			Content:      "此消息由机器人自动发送：\n" + result,
 		}
 
 		// 将响应消息转为 XML 格式
